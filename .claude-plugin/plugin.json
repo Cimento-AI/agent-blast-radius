@@ -1,0 +1,20 @@
+{
+  "name": "agent-blast-radius",
+  "version": "0.2.0",
+  "description": "How many approval clicks stand between a poisoned README and your keys leaving your laptop? Checks Claude Code, Cursor and Codex locally and gives you the one-line fix.",
+  "author": {
+    "name": "Cimento",
+    "url": "https://cimento.ai"
+  },
+  "homepage": "https://cimento.ai/blast-radius",
+  "repository": "https://github.com/Cimento-AI/agent-blast-radius",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "prompt-injection",
+    "lethal-trifecta",
+    "mcp",
+    "codex",
+    "cursor"
+  ]
+}

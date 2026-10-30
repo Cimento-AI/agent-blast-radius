@@ -1,0 +1,15 @@
+{
+  "name": "cimento",
+  "owner": {
+    "name": "Cimento",
+    "url": "https://cimento.ai"
+  },
+  "description": "Free security plugins from Cimento for teams running coding agents.",
+  "plugins": [
+    {
+      "name": "agent-blast-radius",
+      "source": "./",
+      "description": "How many approval clicks stand between a poisoned README and your keys leaving your laptop? Checks Claude Code, Cursor and Codex locally and gives you the one-line fix."
+    }
+  ]
+}
