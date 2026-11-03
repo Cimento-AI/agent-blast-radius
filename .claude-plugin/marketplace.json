@@ -9,7 +9,7 @@
     {
       "name": "agent-blast-radius",
       "source": "./",
-      "description": "Who can talk to your coding agents? Works out what Claude Code, Cursor and Codex on your laptop listen to, what they'll do without asking, and whether anyone would know, then writes it up with the one change that matters. Runs locally; sends nothing."
+      "description": "Ask Claude Code who can talk to it. Works out where it reads, who can write there, what it will send without anyone approving, and whether anyone would know, then names the one change that matters. Runs locally; sends nothing."
     }
   ]
 }

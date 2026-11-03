@@ -67,70 +67,22 @@ class CanSend(unittest.TestCase):
             self.assertEqual(agent_setup.can_send(rule), expected, rule)
 
 
-REPORT = {
-    "project": "~/repo",
-    "verdicts": {"codex": {"clicks": 0, "reviewer": None}, "cursor": {"clicks": 1, "reviewer": None}},
-    "fixes": {"codex": {"agent": "codex", "file": "~/.codex/config.toml", "set": ['sandbox_mode = "workspace-write"']}},
-}
-
-
-def write_up(**changes):
-    content = {
-        "headline": "Anyone who files a Jira ticket can put words in front of Codex, and Codex runs commands without asking.",
-        "lead": "Codex reads Jira through its MCP server and runs with full access.",
-        "sources": [{"name": "Jira", "who": "Anyone who can file or comment on a ticket.", "reach": "customers",
-                     "agents": ["codex"], "unseen": False},
-                    {"name": "Linear", "who": "Your workspace.", "reach": "company", "agents": ["codex", "cursor"]}],
-        "agents": {"codex": "Reads Jira, opens AWS keys, runs anything unasked.", "cursor": "Asks before it runs commands."},
-        "watched": "No. Nothing on this laptop reports what these agents do.",
-        "fix_agent": "codex",
-        "fix": "Put Codex back in its sandbox.",
-        "note": "Codex on my laptop reads Jira and runs commands without asking.",
-    }
-    content.update(changes)
-    return content
-
-
-class PageCheck(unittest.TestCase):
-    def problems(self, **changes):
-        return agent_setup.check_page(write_up(**changes), REPORT)
-
-    def test_a_good_write_up_passes(self):
-        self.assertEqual(self.problems(), [])
-
-    def test_length_limits_name_the_field(self):
-        self.assertIn("headline: 121 characters, keep it to 120", self.problems(headline="x" * 121))
-
-    def test_secret_shaped_text_is_rejected(self):
-        problems = self.problems(lead="The token ghp_abcdefghijklmnopqrstuvwxyz0123456789 is in the config.")
-        self.assertTrue(any(p.startswith("lead: looks like it holds a secret") for p in problems))
-
-    def test_ordinary_words_are_not_secrets(self):
-        for word in ("risk-free", "danger-full-access", "workspace-write", "bypassPermissions"):
-            self.assertFalse(agent_setup.looks_secret(word), word)
-
-    def test_agents_must_come_from_the_facts(self):
-        bad = [{"name": "Slack", "who": "x", "reach": "company", "agents": ["claude_code"]}]
-        self.assertTrue(any(p.startswith("sources[0].agents") for p in self.problems(sources=bad)))
-        self.assertTrue(any(p.startswith("agents:") for p in self.problems(agents={"codex": "x"})))
-
-    def test_the_note_carries_no_paths_or_hosts(self):
-        for note in ("Codex can read ~/.aws/credentials", "see https://example.com", "our db.internal.example.com host"):
-            self.assertTrue(any(p.startswith("note:") for p in self.problems(note=note)), note)
-
-    def test_fix_agent_must_have_a_fix(self):
-        self.assertTrue(any(p.startswith("fix_agent") for p in self.problems(fix_agent="cursor")))
-
-    def test_dots_come_from_the_facts(self):
-        page = agent_setup.render_page(write_up(), REPORT)
-        self.assertIn('<span class="no">sends without asking</span>', page)
-        self.assertIn('<span class="you">asks before sending</span>', page)
+class AutoMode(unittest.TestCase):
+    def test_rules_auto_mode_drops(self):
+        cases = {
+            "Bash": True, "Bash(*)": True, "Bash(python:*)": True, "Bash(node:*)": True, "Bash(npm run:*)": True,
+            "Bash(npx:*)": True, "Bash(uv run:*)": True, "Agent": True,
+            "Bash(curl:*)": False, "Bash(git push:*)": False, "Bash(npm test)": False, "Bash(npm test:*)": False,
+            "Bash(python3 scripts/check.py)": False, "WebFetch": False, "mcp__github__create_issue": False,
+        }
+        for rule, expected in cases.items():
+            self.assertEqual(agent_setup.dropped_in_auto(rule), expected, rule)
 
 
 class EndToEnd(unittest.TestCase):
-    """A fake laptop: Codex with full access, a curl allow rule in Claude Code,
-    a plaintext GitHub token in an MCP server, AWS keys, and a repo whose
-    .mcp.json tries to talk to the model."""
+    """A fake laptop: a curl allow rule in Claude Code, a GitHub MCP server
+    with a plaintext token, AWS keys, and a repo whose .mcp.json tries to
+    talk to the model."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -138,8 +90,7 @@ class EndToEnd(unittest.TestCase):
         self.home, self.repo, self.system = (os.path.join(root, d) for d in ("home", "repo", "system"))
         for d in (self.home, self.repo, self.system):
             os.makedirs(d)
-        self.write(self.home, ".codex/config.toml", 'sandbox_mode = "danger-full-access"\n')
-        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"allow": ["Bash(curl:*)"]}}))
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"allow": ["Bash(curl:*)", "Bash(git status)"]}}))
         self.token = "ghp_" + "a1b2c3d4e5" * 4
         self.write(self.home, ".claude.json", json.dumps({"mcpServers": {"github": {
             "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
@@ -159,49 +110,69 @@ class EndToEnd(unittest.TestCase):
         with open(path, "w") as f:
             f.write(text)
 
-    def run_script(self, *args, stdin=None, check=True):
-        env = {"HOME": self.home, "BLAST_RADIUS_SYSTEM_ROOT": self.system, "PATH": os.environ.get("PATH", ""),
-               "BLAST_RADIUS_NO_OPEN": "1", "TMPDIR": self.tmp.name}
-        return subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)] + list(args), input=stdin,
-                              cwd=self.repo, env=env, capture_output=True, text=True, check=check)
+    def run_script(self):
+        env = {"HOME": self.home, "BLAST_RADIUS_SYSTEM_ROOT": self.system, "PATH": os.environ.get("PATH", "")}
+        out = subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)], cwd=self.repo, env=env,
+                             capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(self.token, out)
+        self.assertNotIn(self.aws_secret, out)
+        return json.loads(out)
 
     def test_report(self):
-        raw = self.run_script().stdout
-        self.assertNotIn(self.token, raw)
-        self.assertNotIn(self.aws_secret, raw)
-        report = json.loads(raw)
-        codex, claude = report["verdicts"]["codex"], report["verdicts"]["claude_code"]
-        self.assertEqual(codex["clicks"], 0)
-        self.assertIsNone(codex["reviewer"])
-        self.assertIn("AWS keys", codex["data"])
-        self.assertTrue(any("curl" in p["via"] and p["asks"] == "no" for p in claude["out"]))
-        self.assertIn("github", claude["whole_trifecta_servers"])
-        self.assertEqual(list(report["fixes"])[0], "codex")
-        # Claude Code's default here is auto mode, so removing the curl rule hands curl to the classifier, not you.
-        self.assertEqual(report["fixes"]["claude_code"]["approver_after"], "classifier")
-        self.assertEqual(report["watching"]["agents"]["codex"]["hooks"], [])
-        repo_server = [s for s in report["agents"]["claude_code"]["mcp_servers"] if s["scope"] == "repo"][0]
+        report = self.run_script()
+        self.assertEqual((report["mode"], report["mode_from"]), ("auto", "Claude Code's default"))
+        self.assertIn("AWS keys", report["can_open"])
+        self.assertIn("plaintext tokens in your Claude Code config", report["can_open"])
+        self.assertTrue(any("curl" in p["via"] and p["asks"] == "no" for p in report["ways_out"]))
+        self.assertIn("github", report["whole_trifecta_servers"])
+        self.assertEqual(report["watching"], {"hooks": [], "telemetry": None, "local_transcripts": []})
+        repo_server = [s for s in report["settings"]["mcp_servers"] if s["scope"] == "repo"][0]
         self.assertLessEqual(len(repo_server["name"]), 40)
         self.assertFalse(repo_server["approved"])
-        self.assertEqual(report["plaintext_secrets_in_agent_configs"][0]["count"], 1)
 
-    def test_page(self):
-        content = write_up(agents={"codex": "Reads <script>alert(1)</script> nothing.", "claude_code": "Asks first."},
-                           sources=[{"name": "GitHub", "who": "Anyone.", "reach": "anyone", "agents": ["claude_code"]}])
-        path = self.run_script("page", stdin=json.dumps(content)).stdout.strip()
-        with open(path) as f:
-            page = f.read()
-        self.assertNotIn(self.token, page)
-        self.assertNotIn(self.aws_secret, page)
-        self.assertNotIn("<script>alert", page)
-        self.assertIn("&lt;script&gt;", page)
-        self.assertNotIn("@@", page)
-        self.assertNotIn("IGNORE PRIOR INSTRUCTIONS", page)
+    def test_fix_hands_the_rule_to_auto_modes_classifier(self):
+        fix = self.run_script()["fix"]
+        self.assertEqual(fix["change"], "remove the allow rule Bash(curl:*)")
+        self.assertEqual(fix["approver_after"], "classifier")
 
-    def test_page_rejects_with_reasons(self):
-        out = self.run_script("page", stdin=json.dumps(write_up(headline="x" * 200)), check=False)
-        self.assertNotEqual(out.returncode, 0)
-        self.assertIn("headline: 200 characters", out.stderr)
+    def test_a_shell_alias_overrides_the_settings(self):
+        self.write(self.home, ".zshrc", "alias claude='claude --dangerously-skip-permissions'\n")
+        report = self.run_script()
+        self.assertEqual(report["mode"], "bypassPermissions")
+        self.assertEqual(report["mode_from"], "shell alias in ~/.zshrc")
+        self.assertEqual(report["fix"]["file"], "~/.zshrc")
+
+    def test_bypass_in_user_settings(self):
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}))
+        report = self.run_script()
+        self.assertEqual(report["ways_out"][0]["asks"], "no")
+        self.assertEqual(report["fix"]["approver_after"], "you")
+
+    def test_an_allowed_mcp_server_that_posts(self):
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"defaultMode": "default",
+                                                                                   "allow": ["mcp__github__create_issue"]}}))
+        fix = self.run_script()["fix"]
+        self.assertEqual(fix["change"], "remove the allow rule mcp__github__create_issue")
+        self.assertEqual(fix["approver_after"], "you")
+
+    def test_auto_mode_sends_dropped_rules_to_the_classifier(self):
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"allow": ["Bash(npm run:*)", "Bash(curl:*)"]}}))
+        report = self.run_script()
+        asks = {p["via"].split(" (")[0]: p["asks"] for p in report["ways_out"]}
+        self.assertEqual(asks["Bash(npm run:*)"], "classifier")
+        self.assertEqual(asks["Bash(curl:*)"], "no")
+        self.assertEqual(report["fix"]["change"], "remove the allow rule Bash(curl:*)")
+
+    def test_the_same_rule_skips_approval_outside_auto_mode(self):
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"defaultMode": "default",
+                                                                                   "allow": ["Bash(npm run:*)"]}}))
+        report = self.run_script()
+        self.assertTrue(any(p["via"].startswith("Bash(npm run:*)") and p["asks"] == "no" for p in report["ways_out"]))
+
+    def test_nothing_unapproved_means_no_fix(self):
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": {"defaultMode": "default"}}))
+        self.write(self.home, ".claude.json", json.dumps({}))
+        self.assertIsNone(self.run_script()["fix"])
 
 
 if __name__ == "__main__":

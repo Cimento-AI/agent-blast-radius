@@ -1,12 +1,12 @@
 # agent-blast-radius
 
-Who can talk to your coding agents?
+Ask Claude Code who can talk to it.
 
-Anything an agent reads can steer it. So the useful question about your setup isn't which settings are on. It's who can put words in front of Claude Code, Cursor and Codex on your laptop, and what those agents will do without asking you.
+Anything an agent reads can steer it. So the useful question about your Claude Code setup isn't which settings are on. It's who can put words in front of it, and what it will do without anyone approving.
 
-`/blast-radius` answers that for your machine. A script reads how each agent is set up. Then Claude works out what that means for you: where your agents read, who can actually write there, which agent can act on it without anyone approving, whether anyone would know, and the one change that closes the worst of it. The result is a short page in your browser.
+`/blast-radius` answers that for your machine. A script reads how Claude Code is set up. Then Claude Code works out what that means for you: where it reads, who can actually write there, what it can send without anyone approving, whether anyone would know, and the one change that closes the worst of it.
 
-The answers are usually not the obvious ones. An analytics or error-tracking connection is a channel anyone who visits your website can write into, because the keys those tools use in the browser are public. A shared Slack channel includes people from other companies. And the services Claude Code is connected to through your claude.ai account don't appear in any config file on your laptop, so most people don't know they're there.
+The answers are usually not the obvious ones. An analytics or error-tracking connection is a channel anyone who uses your app can write into, because the keys those tools use in the browser are public. A shared Slack channel includes people from other companies. And the services Claude Code is connected to through your claude.ai account don't appear in any config file on your laptop, so most people don't know they're there.
 
 ## Install
 
@@ -17,63 +17,58 @@ In Claude Code:
 /plugin install agent-blast-radius@cimento
 ```
 
-Then type `/blast-radius`, or ask "who can talk to my agents?"
+Then type `/blast-radius`, or ask "who can talk to you?"
 
 ## What you get
 
-In the terminal, one sentence and a page:
+A short answer in the chat, in Claude Code's own voice. For example:
 
-```
-If your app sends PostHog events from the browser, anyone can talk to
-me, and your curl rule skips auto mode's check.
+> **If your app sends PostHog events from the browser, anyone who uses it can talk to me, and your curl rule skips auto mode's check, so nobody approves a curl.**
+>
+> A model approves my commands, but the allow rule `Bash(curl --silent --show-error --location:*)` in `~/.claude/settings.json` skips that check, and it doesn't limit where curl sends. I can open the AWS keys and the SSH key without a passphrase saved on this laptop.
+>
+> **Who can talk to me**
+> - **PostHog MCP server**: whoever your app records, and if it sends events from the browser, anyone who uses it.
+> - **Sentry** (claude.ai connector, in no config file): whoever can make your app throw an error.
+> - **Slack** (claude.ai connector, in no config file): your channels, and other companies if you have shared channels.
+> - **Jira** (claude.ai connector, in no config file): anyone who can file or comment on a ticket.
+>
+> **Would anyone know?** Most likely. A company program runs before and after each tool runs, and when a session starts and ends.
+>
+> **The one change:** remove that rule. Curl then goes to the same model as my other commands. Slack and Jira can still post, with that model approving; you turn them off in your claude.ai connector settings. Want me to make it? I'll show you the diff first. I can also write a note for whoever owns security.
 
-I wrote it up. It's open in your browser.
-Want me to make the one change? I'll show you the diff first.
-```
-
-The page has five parts:
-
-- **Who can talk to your agents.** Every place your agents read, who can write there, and how wide that is: your team, your company, your customers, or anyone. It also marks the services that are connected but appear in no config file.
-- **What they do without asking.** For each agent, the three legs of Simon Willison's [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/): it listens to others, it can read private data, it can send things out. The first two are true of every coding agent, so the third is the one you control.
-- **Would anyone know?** Whether hooks or telemetry send a record of what your agents do anywhere besides your laptop.
-- **The one change.** The smallest config change that closes the worst path, and what you give up for it. If you say yes, Claude makes it and shows you the diff.
-- **A note for whoever owns security**, written in your voice, naming products and credential types but no paths, hosts or values.
+Say yes and it makes the change and shows you the diff. Ask for the note and you get a few sentences, in your voice, for whoever owns security. The note names products and credential types but no paths, hosts or values.
 
 ## How it works
 
 The work is split in two on purpose.
 
-[`scripts/agent_setup.py`](scripts/agent_setup.py) gathers the facts, and it's where every judgment you'd want to audit lives: which config files apply, which allow rules can send data out (curl, ssh, `git push`, a bare `node` or `python`), whether anyone approves them, and what the fix is. It's deterministic, standard-library Python, and covered by tests. You can run it without Claude:
+[`scripts/agent_setup.py`](scripts/agent_setup.py) gathers the facts, and it's where every judgment you'd want to audit lives: which settings layers apply, which allow rules can send data out (curl, ssh, `git push`, a bare `node` or `python`, and `npm test`, which runs whatever the repo says), whether anyone approves them (auto mode drops the broad ones itself, and the script accounts for that), and what the fix is. It's deterministic, standard-library Python, and covered by tests. You can run it without Claude:
 
 ```
 python3 scripts/agent_setup.py
 ```
 
-Claude reads those facts and does the part a script can't: knowing who writes to each service you're connected to, comparing its own live tool list with what your config files say, and picking the true thing about your setup you'd least expect. The skill tells it to describe who can reach what and which setting allows it, never how to exploit it, and to hedge anything it infers.
-
-The script then checks Claude's write-up before showing it. It enforces length limits, rejects anything shaped like a secret, requires every agent and fix to match the facts, and escapes everything. The trifecta dots on the page are drawn from the facts, not from Claude's words, so the write-up can't make an agent look safer than it is.
+Claude Code reads those facts and does the part a script can't. It knows who writes to each service you're connected to, compares its own live tool list with what your config files say, and picks the true thing about your setup you'd least expect. The skill tells it to describe who can reach what and which setting allows it, never how to exploit it, and to hedge anything it infers.
 
 ## What it reads, and what it doesn't
 
-- Claude Code: managed, user, project and local settings; `~/.claude.json`; `.mcp.json`; `managed-mcp.json`; installed plugins' MCP servers.
-- Codex: `/etc/codex/config.toml`, `~/.codex/config.toml`, a trusted project's `.codex/config.toml`, `requirements.toml`, `~/.codex/rules/*.rules`, `hooks.json` and profile files.
-- Cursor: `mcp.json`, `cli-config.json`, `sandbox.json`, `hooks.json`, and the run-mode fields of Cursor's local settings database (only those fields are read).
-- Shell startup files, only to find aliases that add flags such as `--dangerously-skip-permissions` or `--yolo`.
+- Claude Code's managed, user, project and local settings; `~/.claude.json`; `.mcp.json`; `managed-mcp.json`; installed plugins' MCP servers.
+- Shell startup files, only to find aliases that add flags such as `--dangerously-skip-permissions`.
 - Credential files such as `~/.aws/credentials` and `~/.ssh/id_*` are opened only to answer "does this hold a credential?" The output says yes or no and never includes their contents.
 - Secret values never reach the output. Env vars and headers keep their names only, and credential-shaped arguments, URL parts and rule text become `<redacted>`. The tests cover the cases we know about; please open an issue if you find one we missed.
-- Nothing is sent to Cimento. The plugin makes no network calls. Claude sees the facts the way it sees any command you run in a session, and the page is a local file.
+- Nothing is sent to Cimento. The plugin makes no network calls. Claude sees the facts the way it sees any command you run in a session.
 - If you say yes to the fix, Claude edits that one setting in that one file in your home folder and shows you the diff. It never edits files inside a repository or company-managed files.
 
 ## Limits
 
-- It reads configuration, not behavior. An agent that asks first can still be talked into asking you something misleading.
+- It reads configuration, not behavior. A setup where you approve everything can still be talked into asking you something misleading.
 - What Claude says about who writes to a service is reasoning, not a scan of that service. It says "if" when it's inferring.
-- Only Claude Code can report its own live connections. Cursor's and Codex's come from their config files.
 - macOS and Linux. Windows paths aren't covered yet.
 
 ## For teams
 
-This reads one laptop, once. [Cimento Agent Hub](https://cimento.ai/blast-radius?ref=github) answers the same questions for every engineer's Claude Code, Cursor and Codex, keeps a record of what the agents actually do, and enforces the fix as policy.
+This reads one laptop, once. [Cimento Agent Hub](https://cimento.ai/blast-radius?ref=github) answers the same questions for every engineer's coding agents, keeps a record of what they actually do, and enforces the fix as policy.
 
 ## License
 
