@@ -1,7 +1,7 @@
 {
   "name": "agent-blast-radius",
-  "version": "0.2.0",
-  "description": "How many approval clicks stand between a poisoned README and your keys leaving your laptop? Checks Claude Code, Cursor and Codex locally and gives you the one-line fix.",
+  "version": "0.4.0",
+  "description": "Who can talk to your coding agents? Works out what Claude Code, Cursor and Codex on your laptop listen to, what they'll do without asking, and whether anyone would know, then writes it up with the one change that matters. Runs locally; sends nothing.",
   "author": {
     "name": "Cimento",
     "url": "https://cimento.ai"

@@ -59,11 +59,72 @@ class CanSend(unittest.TestCase):
         cases = {
             "Bash": True, "Bash(*)": True, "Bash(curl:*)": True, "Bash(curl --silent --location:*)": True,
             "git push": True, "git fetch": False, "git rebase": False, "node": True,
-            "node scripts/test.js": False, "Bash(npm run test:*)": True, "npm test": False,
+            "node scripts/test.js": False, "Bash(npm run test:*)": True, "npm test": True, "Bash(npm test:*)": True,
+            "npm ci": False,
             "ls": False, "Shell(ls)": False, "gh api": True, "gh auth status": False,
         }
         for rule, expected in cases.items():
             self.assertEqual(agent_setup.can_send(rule), expected, rule)
+
+
+REPORT = {
+    "project": "~/repo",
+    "verdicts": {"codex": {"clicks": 0, "reviewer": None}, "cursor": {"clicks": 1, "reviewer": None}},
+    "fixes": {"codex": {"agent": "codex", "file": "~/.codex/config.toml", "set": ['sandbox_mode = "workspace-write"']}},
+}
+
+
+def write_up(**changes):
+    content = {
+        "headline": "Anyone who files a Jira ticket can put words in front of Codex, and Codex runs commands without asking.",
+        "lead": "Codex reads Jira through its MCP server and runs with full access.",
+        "sources": [{"name": "Jira", "who": "Anyone who can file or comment on a ticket.", "reach": "customers",
+                     "agents": ["codex"], "unseen": False},
+                    {"name": "Linear", "who": "Your workspace.", "reach": "company", "agents": ["codex", "cursor"]}],
+        "agents": {"codex": "Reads Jira, opens AWS keys, runs anything unasked.", "cursor": "Asks before it runs commands."},
+        "watched": "No. Nothing on this laptop reports what these agents do.",
+        "fix_agent": "codex",
+        "fix": "Put Codex back in its sandbox.",
+        "note": "Codex on my laptop reads Jira and runs commands without asking.",
+    }
+    content.update(changes)
+    return content
+
+
+class PageCheck(unittest.TestCase):
+    def problems(self, **changes):
+        return agent_setup.check_page(write_up(**changes), REPORT)
+
+    def test_a_good_write_up_passes(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_length_limits_name_the_field(self):
+        self.assertIn("headline: 121 characters, keep it to 120", self.problems(headline="x" * 121))
+
+    def test_secret_shaped_text_is_rejected(self):
+        problems = self.problems(lead="The token ghp_abcdefghijklmnopqrstuvwxyz0123456789 is in the config.")
+        self.assertTrue(any(p.startswith("lead: looks like it holds a secret") for p in problems))
+
+    def test_ordinary_words_are_not_secrets(self):
+        for word in ("risk-free", "danger-full-access", "workspace-write", "bypassPermissions"):
+            self.assertFalse(agent_setup.looks_secret(word), word)
+
+    def test_agents_must_come_from_the_facts(self):
+        bad = [{"name": "Slack", "who": "x", "reach": "company", "agents": ["claude_code"]}]
+        self.assertTrue(any(p.startswith("sources[0].agents") for p in self.problems(sources=bad)))
+        self.assertTrue(any(p.startswith("agents:") for p in self.problems(agents={"codex": "x"})))
+
+    def test_the_note_carries_no_paths_or_hosts(self):
+        for note in ("Codex can read ~/.aws/credentials", "see https://example.com", "our db.internal.example.com host"):
+            self.assertTrue(any(p.startswith("note:") for p in self.problems(note=note)), note)
+
+    def test_fix_agent_must_have_a_fix(self):
+        self.assertTrue(any(p.startswith("fix_agent") for p in self.problems(fix_agent="cursor")))
+
+    def test_dots_come_from_the_facts(self):
+        page = agent_setup.render_page(write_up(), REPORT)
+        self.assertIn('<span class="no">sends without asking</span>', page)
+        self.assertIn('<span class="you">asks before sending</span>', page)
 
 
 class EndToEnd(unittest.TestCase):
@@ -98,14 +159,14 @@ class EndToEnd(unittest.TestCase):
         with open(path, "w") as f:
             f.write(text)
 
-    def run_script(self, *args):
-        env = {"HOME": self.home, "BLAST_RADIUS_SYSTEM_ROOT": self.system, "PATH": os.environ.get("PATH", "")}
-        out = subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)] + list(args),
-                             cwd=self.repo, env=env, capture_output=True, text=True, check=True)
-        return out.stdout
+    def run_script(self, *args, stdin=None, check=True):
+        env = {"HOME": self.home, "BLAST_RADIUS_SYSTEM_ROOT": self.system, "PATH": os.environ.get("PATH", ""),
+               "BLAST_RADIUS_NO_OPEN": "1", "TMPDIR": self.tmp.name}
+        return subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)] + list(args), input=stdin,
+                              cwd=self.repo, env=env, capture_output=True, text=True, check=check)
 
     def test_report(self):
-        raw = self.run_script()
+        raw = self.run_script().stdout
         self.assertNotIn(self.token, raw)
         self.assertNotIn(self.aws_secret, raw)
         report = json.loads(raw)
@@ -115,16 +176,32 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("AWS keys", codex["data"])
         self.assertTrue(any("curl" in p["via"] and p["asks"] == "no" for p in claude["out"]))
         self.assertIn("github", claude["whole_trifecta_servers"])
-        self.assertEqual(report["fix"]["agent"], "codex")
+        self.assertEqual(list(report["fixes"])[0], "codex")
+        # Claude Code's default here is auto mode, so removing the curl rule hands curl to the classifier, not you.
+        self.assertEqual(report["fixes"]["claude_code"]["approver_after"], "classifier")
+        self.assertEqual(report["watching"]["agents"]["codex"]["hooks"], [])
         repo_server = [s for s in report["agents"]["claude_code"]["mcp_servers"] if s["scope"] == "repo"][0]
         self.assertLessEqual(len(repo_server["name"]), 40)
         self.assertFalse(repo_server["approved"])
         self.assertEqual(report["plaintext_secrets_in_agent_configs"][0]["count"], 1)
 
-    def test_text_mode(self):
-        text = self.run_script("--text")
-        self.assertIn("0 clicks", text)
-        self.assertNotIn(self.token, text)
+    def test_page(self):
+        content = write_up(agents={"codex": "Reads <script>alert(1)</script> nothing.", "claude_code": "Asks first."},
+                           sources=[{"name": "GitHub", "who": "Anyone.", "reach": "anyone", "agents": ["claude_code"]}])
+        path = self.run_script("page", stdin=json.dumps(content)).stdout.strip()
+        with open(path) as f:
+            page = f.read()
+        self.assertNotIn(self.token, page)
+        self.assertNotIn(self.aws_secret, page)
+        self.assertNotIn("<script>alert", page)
+        self.assertIn("&lt;script&gt;", page)
+        self.assertNotIn("@@", page)
+        self.assertNotIn("IGNORE PRIOR INSTRUCTIONS", page)
+
+    def test_page_rejects_with_reasons(self):
+        out = self.run_script("page", stdin=json.dumps(write_up(headline="x" * 200)), check=False)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("headline: 200 characters", out.stderr)
 
 
 if __name__ == "__main__":
