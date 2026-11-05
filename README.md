@@ -53,7 +53,7 @@ Claude Code reads those facts and does the part a script can't. It knows who wri
 
 ## What it reads, and what it doesn't
 
-- Claude Code's managed, user, project and local settings; `~/.claude.json`; `.mcp.json`; `managed-mcp.json`; installed plugins' MCP servers.
+- Claude Code's managed, user, project and local settings, with local settings read from the repo root (the main checkout's root in a worktree, found through the `.git` and `commondir` files); `~/.claude.json`; `.mcp.json`; `managed-mcp.json`; installed plugins' MCP servers.
 - Shell startup files, only to find aliases that add flags such as `--dangerously-skip-permissions`.
 - Credential files such as `~/.aws/credentials` and `~/.ssh/id_*` are opened only to answer "does this hold a credential?" The output says yes or no and never includes their contents.
 - Secret values never reach the output. Env vars and headers keep their names only, and credential-shaped arguments, URL parts and rule text become `<redacted>`. The tests cover the cases we know about; please open an issue if you find one we missed.

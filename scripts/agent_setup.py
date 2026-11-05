@@ -18,7 +18,7 @@ import os
 import re
 import sys
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 HOME = os.path.expanduser("~")
 # Tests point this at a fake filesystem root; real runs leave it empty.
 SYSTEM = os.environ.get("BLAST_RADIUS_SYSTEM_ROOT", "")
@@ -122,7 +122,7 @@ def read_text(path, limit=2_000_000):
             text = f.read(limit)
     except OSError:
         return None
-    FILES_READ.append(tilde(path))
+    FILES_READ.append(clean(tilde(path), 200))
     return text
 
 
@@ -135,6 +135,46 @@ def read_json(path):
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def git_pointer(path, prefix=""):
+    """The path a .git file or a commondir file points at, or None."""
+    m = re.match(re.escape(prefix) + r"\s*([^\x00\r\n]+)", read_text(path, 4096) or "")
+    return m.group(1).strip() if m else None
+
+
+def repo_root():
+    """The first folder at or above CWD with a .git entry, or None. In a linked
+    worktree, the main checkout's root. Reads files only; never runs git."""
+    path = CWD
+    while not os.path.lexists(os.path.join(path, ".git")):
+        if os.path.dirname(path) == path:
+            return None
+        path = os.path.dirname(path)
+    dot_git = os.path.join(path, ".git")
+    gitdir = git_pointer(dot_git, "gitdir:") if os.path.isfile(dot_git) else None
+    common = git_pointer(os.path.join(path, gitdir, "commondir")) if gitdir else None
+    if common:
+        common = os.path.realpath(os.path.join(path, gitdir, common))
+        if os.path.basename(common) == ".git" and os.path.isdir(common):
+            return os.path.dirname(common)
+    return path
+
+
+def local_settings_root():
+    """The repo root whose .claude/settings.local.json Claude Code uses, or None
+    when it uses CWD's: no repo, the root is the home folder, or someone else
+    owns the root, its .git or its .claude (https://code.claude.com/docs/en/settings)."""
+    root = repo_root()
+    if root is None or os.path.realpath(root) == os.path.realpath(HOME):
+        return None
+    for path in (root, os.path.join(root, ".git"), os.path.join(root, ".claude")):
+        try:
+            if os.lstat(path).st_uid != os.getuid():
+                return None
+        except OSError:
+            pass
+    return root
 
 
 # ---------------------------------------------------------------- servers
@@ -325,20 +365,34 @@ def rule_command(rule):
     return command_words(rule)[0]
 
 
+# How the fix names a settings file it points at, for scopes outside the home folder.
+REPO_SETTINGS = ".claude/settings.json in this repo"
+LOCAL_AT_ROOT = ".claude/settings.local.json at the repo root"
+LOCAL_IN_CWD = ".claude/settings.local.json in this folder"
+
+
 def claude_code(flags):
+    root = local_settings_root()
+    local_file = {}
+    # An earlier version may have left a file in CWD. Rules from both files apply;
+    # the root's is read last so its scalar values win.
+    if root != CWD:
+        local_file[os.path.join(CWD, ".claude", "settings.local.json")] = LOCAL_IN_CWD
+    if root:
+        local_file[os.path.join(root, ".claude", "settings.local.json")] = LOCAL_AT_ROOT
     managed = SYSTEM + ("/Library/Application Support/ClaudeCode" if sys.platform == "darwin" else "/etc/claude-code")
     layers = [("company", os.path.join(managed, "managed-settings.json"))]
     layers += [("company", p) for p in sorted(glob.glob(os.path.join(managed, "managed-settings.d", "*.json")))]
     layers += [("company", os.path.join(HOME, ".claude", "remote-settings.json")),
                ("user", os.path.join(HOME, ".claude", "settings.json")),
-               ("repo", os.path.join(CWD, ".claude", "settings.json")),
-               ("repo", os.path.join(CWD, ".claude", "settings.local.json"))]
+               ("repo", os.path.join(CWD, ".claude", "settings.json"))]
+    layers += [("local", p) for p in local_file]
     user_config = read_json(os.path.join(HOME, ".claude.json"))
     if user_config is None and not os.path.isdir(os.path.join(HOME, ".claude")):
         return None
 
-    r = {"mode": None, "mode_set_by": None, "allow": [], "deny": [], "sandbox": None, "hooks": [],
-         "telemetry": None, "mcp_servers": [], "company_keys": [], "shell_flags": flags}
+    r = {"project_root": clean(tilde(root), 200) if root else None, "mode": None, "mode_set_by": None,
+         "allow": [], "deny": [], "sandbox": None, "hooks": [], "telemetry": None, "mcp_servers": [], "company_keys": [], "shell_flags": flags}
     enabled_mcpjson, all_mcpjson, plugins = set(), False, []
     for scope, path in layers:
         s = read_json(path)
@@ -348,12 +402,15 @@ def claude_code(flags):
             r["company_keys"] += sorted(set(s) | {"permissions." + k for k in (s.get("permissions") or {})})
         perms = s.get("permissions") if isinstance(s.get("permissions"), dict) else {}
         mode = perms.get("defaultMode")
-        if mode and not (scope == "repo" and mode in ("auto", "bypassPermissions")) and r["mode_set_by"] != "company":
+        if mode and not (scope in ("repo", "local") and mode in ("auto", "bypassPermissions")) and r["mode_set_by"] != "company":
             r["mode"], r["mode_set_by"] = mode, scope
         for kind in ("allow", "deny"):
             for rule in perms.get(kind) or []:
-                r[kind].append({"rule": scrub_rule(rule), "command": rule_command(rule), "sends": can_send(rule),
-                                "dropped_in_auto": dropped_in_auto(rule), "scope": scope})
+                entry = {"rule": scrub_rule(rule), "command": rule_command(rule), "sends": can_send(rule),
+                         "dropped_in_auto": dropped_in_auto(rule), "scope": scope}
+                if scope == "local":
+                    entry["file"] = local_file[path]
+                r[kind].append(entry)
         if perms.get("disableBypassPermissionsMode") == "disable":
             r["bypass_disabled_by"] = scope
         sb = s.get("sandbox") if isinstance(s.get("sandbox"), dict) else None
@@ -380,9 +437,14 @@ def claude_code(flags):
 
     if user_config:
         r["mcp_servers"] += servers_from(user_config.get("mcpServers"), "user")
-        project = (user_config.get("projects") or {}).get(CWD) or {}
-        r["mcp_servers"] += servers_from(project.get("mcpServers"), "repo")
-        enabled_mcpjson |= set(project.get("enabledMcpjsonServers") or [])
+        # Which folder Claude Code keys a project by isn't documented, so read both.
+        local_servers = {}
+        for key in filter(None, (root, CWD)):
+            project = (user_config.get("projects") or {}).get(key) or {}
+            if isinstance(project.get("mcpServers"), dict):
+                local_servers.update(project["mcpServers"])
+            enabled_mcpjson |= set(project.get("enabledMcpjsonServers") or [])
+        r["mcp_servers"] += servers_from(local_servers, "local")
     project_mcp = read_json(os.path.join(CWD, ".mcp.json"))
     for s in servers_from((project_mcp or {}).get("mcpServers"), "repo"):
         s["approved"] = all_mcpjson or s["name"] in enabled_mcpjson
@@ -428,6 +490,12 @@ def claude_verdict(c, data):
     ask_any = {"bypassPermissions": "no", "auto": "classifier", "dontAsk": None}.get(mode, "you")
     sandbox = c["sandbox"] if c["sandbox"] and c["sandbox"]["enabled"] else None
     out = []
+
+    def way_out(via, asks):
+        # The same rule can sit in two files; it's still one way out.
+        if {"via": via, "asks": asks} not in out:
+            out.append({"via": via, "asks": asks})
+
     if ask_any:
         why = {"no": "any command, mode " + mode + (" (shell alias)" if flags else ""),
                "classifier": "any command, auto mode: a classifier approves, not you",
@@ -441,9 +509,9 @@ def claude_verdict(c, data):
                 asks, why = "classifier", " (" + rule["scope"] + " allow rule, dropped in auto mode, so the classifier decides)"
             elif sandbox and not sandbox["allows_any_domain"] and cmd not in sandbox["excluded_commands"]:
                 asks = ask_any or "you"
-            out.append({"via": rule["rule"] + why, "asks": asks})
+            way_out(rule["rule"] + why, asks)
         elif rule["rule"].startswith("WebFetch") and rule["rule"] in ("WebFetch", "WebFetch(domain:*)"):
-            out.append({"via": rule["rule"] + " (" + rule["scope"] + " allow rule)", "asks": "no"})
+            way_out(rule["rule"] + " (" + rule["scope"] + " allow rule)", "no")
     allowed_mcp = {r["rule"][5:].split("__")[0] for r in c["allow"] if r["rule"].startswith("mcp__")}
     for s in c["mcp_servers"]:
         if s["writes_out"] and not s.get("disabled") and s.get("approved", True):
@@ -472,7 +540,7 @@ def pick_fix(c, v):
     if v["mode"] == "bypassPermissions":
         if c["mode_set_by"] == "company":
             return {"file": "company-managed settings", "change": "set by your company; ask whoever manages it"}
-        return {"file": "~/.claude/settings.json" if c["mode_set_by"] == "user" else ".claude/settings.json in this repo",
+        return {"file": "~/.claude/settings.json" if c["mode_set_by"] == "user" else REPO_SETTINGS,
                 "set": ['"permissions": { "defaultMode": "default" }'],
                 "after": "commands and MCP tools ask you first; reads and edits you've allowed still don't",
                 "approver_after": "you"}
@@ -482,14 +550,22 @@ def pick_fix(c, v):
               (r["rule"].startswith("mcp__") and r["rule"][5:].split("__")[0] in writers))]
     if not rules:
         return None
-    scope = rules[0]["scope"]
-    names = [r["rule"] for r in rules if r["scope"] == scope]
+    scope, local = rules[0]["scope"], rules[0].get("file")
+    names = [r["rule"] for r in rules if r["scope"] == scope and r.get("file") == local]
     approver = {"auto": "classifier", "dontAsk": "refused"}.get(v["mode"], "you")
-    return {"file": "~/.claude/settings.json" if scope == "user" else ".claude/settings(.local).json in this repo",
-            "change": "remove the allow rule%s %s" % ("s" if len(names) > 1 else "", ", ".join(names)),
-            "after": {"classifier": "those go to auto mode's classifier, which approves instead of you",
-                      "refused": "those are refused"}.get(approver, "those ask you first"),
-            "approver_after": approver}
+    def named(rule):
+        return "~/.claude/settings.json" if rule["scope"] == "user" else rule.get("file") or REPO_SETTINGS
+    fix_file = named(rules[0])
+    # A rule still in another file keeps that way out open after this change.
+    also = sorted({named(r) for r in c["allow"] if r["rule"] in names and r["scope"] != "company"} - {fix_file})
+    fix = {"file": fix_file,
+           "change": "remove the allow rule%s %s" % ("s" if len(names) > 1 else "", ", ".join(names)),
+           "after": {"classifier": "those go to auto mode's classifier, which approves instead of you",
+                     "refused": "those are refused"}.get(approver, "those ask you first"),
+           "approver_after": approver}
+    if also:
+        fix["also_in"] = also
+    return fix
 
 
 # ---------------------------------------------------------------- main
@@ -510,6 +586,7 @@ def build():
     return {
         "blast_radius": VERSION,
         "project": tilde(CWD),
+        "project_root": c["project_root"],
         "mode": v["mode"],
         "mode_from": v["mode_from"],
         "reads": v["in"],
