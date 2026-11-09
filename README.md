@@ -68,7 +68,7 @@ Claude Code reads those facts and does the part a script can't. It knows who wri
 
 ## For teams
 
-This reads one laptop, once. [Cimento Agent Hub](https://cimento.ai/blast-radius?ref=github) answers the same questions for every engineer's coding agents, keeps a record of what they actually do, and enforces the fix as policy.
+This reads one laptop, once. [Cimento Agent Hub](https://cimento.ai/agent-hub?ref=github) answers the same questions for every engineer's coding agents, keeps a record of what they actually do, and enforces the fix as policy.
 
 ## License
 
