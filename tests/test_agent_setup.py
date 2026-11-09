@@ -23,7 +23,7 @@ class Redaction(unittest.TestCase):
         self.assertHidden(agent_setup.scrub_rule("Bash(PGPASSWORD=hunter2 psql -h db)"), "hunter2")
 
     def test_bearer_header_in_a_rule(self):
-        token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        token = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
         rule = 'Bash(curl -H "Authorization: Bearer %s" https://api.github.com)' % token
         self.assertHidden(agent_setup.scrub_rule(rule), token)
 
