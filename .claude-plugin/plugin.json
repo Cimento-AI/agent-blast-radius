@@ -1,6 +1,6 @@
 {
   "name": "agent-blast-radius",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Ask Claude Code who can talk to it. Works out where it reads, who can write there, what it will send without anyone approving, and whether anyone would know, then names the one change that matters. Runs locally; sends nothing.",
   "author": {
     "name": "Cimento",
