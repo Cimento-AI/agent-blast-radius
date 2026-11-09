@@ -76,8 +76,9 @@ def scrub_url(url):
 
 # Flags whose value is user:password, so the whole value goes.
 USER_FLAGS = ("-u", "--user", "--password", "--pass")
-# A NAME=value prefix on a command line.
-ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=\S*")
+# A NAME=value prefix on a command line. After a shell-style split the value can
+# hold spaces (AUTH="Basic abc def" becomes one word), so it may contain anything.
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=.*", re.S)
 
 
 def scrub_word(word, previous=None):
@@ -121,11 +122,14 @@ def scrub_command(text):
 
 
 def split_command(text):
-    """Split like a shell would, so a quoted header stays one word; fall back to spaces."""
+    """Split like a shell would, so a quoted header stays one word."""
     try:
         return shlex.split(text)
     except ValueError:
-        return text.split()
+        # An unbalanced quote somewhere (don't): still keep each closed "..." or
+        # '...' inside its word, so a quoted NAME="a b" value stays one word.
+        words = re.findall(r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'])+|\S+", text)
+        return [re.sub(r"\"([^\"]*)\"|'([^']*)'", lambda q: q.group(1) or q.group(2) or "", w) for w in words]
 
 
 def scrub_rule(rule):
@@ -238,7 +242,7 @@ def touches(text, words):
 def split_program(command):
     """A command line's program, scrubbed and basenamed, after any NAME=value
     prefixes (which are dropped), and the words that follow it, unscrubbed."""
-    words = str(command or "").split()
+    words = split_command(str(command or ""))
     while words and ASSIGNMENT.fullmatch(words[0]):
         words.pop(0)
     if not words:
@@ -369,7 +373,7 @@ def command_words(rule):
     """Bash(curl --silent:*) -> ['curl', '--silent']; Bash -> ['*']; a plain command -> its words."""
     m = re.match(r"^(Bash|Shell)(?:\((.*)\))?$", str(rule), re.S)
     inner = (m.group(2) or "*") if m else str(rule)
-    words = [w.rstrip(":*") or "*" for w in inner.split() if not ASSIGNMENT.fullmatch(w)]
+    words = [w.rstrip(":*") or "*" for w in split_command(inner) if not ASSIGNMENT.fullmatch(w)]
     if not words:
         return ["*"]
     return [os.path.basename(words[0])] + [w for w in words[1:] if w != "*"]
@@ -410,7 +414,8 @@ def dropped_in_auto(rule):
 
 
 def rule_command(rule):
-    return command_words(rule)[0]
+    """The rule's program, scrubbed like the rule itself."""
+    return clean(scrub_word(command_words(rule)[0]), 30)
 
 
 # How the fix names a settings file it points at, for scopes outside the home folder.
