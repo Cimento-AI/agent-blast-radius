@@ -28,7 +28,7 @@ class Redaction(unittest.TestCase):
         self.assertHidden(agent_setup.scrub_rule(rule), token)
 
     def test_exported_key_in_a_rule(self):
-        self.assertHidden(agent_setup.scrub_rule("Bash(export OPENAI_API_KEY=sk-proj-abc123def456)"), "sk-proj")
+        self.assertHidden(agent_setup.scrub_rule("Bash(export OPENAI_API_KEY=sk-proj-EXAMPLExxxx)"), "sk-proj")
 
     def test_password_in_a_url_flag(self):
         self.assertHidden(agent_setup.scrub_word("--database-url=postgres://admin:S3cretPass@db.prod/app"), "S3cretPass")
@@ -37,15 +37,15 @@ class Redaction(unittest.TestCase):
         self.assertHidden(agent_setup.scrub_word("DATABASE_URL=postgresql://u:pw123@h/db"), "pw123")
 
     def test_token_in_a_url_path(self):
-        url = "https://actions.zapier.com/mcp/sk-ak-1a2b3c4d5e6f7g8h9i0j/sse"
-        self.assertHidden(agent_setup.scrub_url(url), "sk-ak-1a2b")
+        url = "https://actions.zapier.com/mcp/sk-ak-EXAMPLExxxxxxxxxxxx/sse"
+        self.assertHidden(agent_setup.scrub_url(url), "sk-ak-EXAMPLE")
 
     def test_query_values(self):
         self.assertHidden(agent_setup.scrub_url("https://example.com/mcp?token=abc123&org=1"), "abc123")
 
     def test_jwt(self):
-        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl"
-        self.assertHidden(agent_setup.scrub_word(jwt), "c2lnbmF0dXJl")
+        jwt = "eyJEXAMPLE.eyJEXAMPLE.EXAMPLExxxx"
+        self.assertHidden(agent_setup.scrub_word(jwt), "EXAMPLExxxx")
 
     def test_short_value_after_a_credential_flag(self):
         self.assertHidden(agent_setup.scrub_command("server --pat abc123"), "abc123")
