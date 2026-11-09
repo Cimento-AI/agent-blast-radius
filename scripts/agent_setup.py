@@ -16,9 +16,10 @@ import glob
 import json
 import os
 import re
+import shlex
 import sys
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 HOME = os.path.expanduser("~")
 # Tests point this at a fake filesystem root; real runs leave it empty.
 SYSTEM = os.environ.get("BLAST_RADIUS_SYSTEM_ROOT", "")
@@ -60,7 +61,8 @@ def is_credential_key(key):
 
 
 def scrub_url(url):
-    url = re.sub(r"(\w[\w+.-]*://)[^@/\s]*@", r"\1", url)
+    # Userinfo runs to the last "@" before the host, since a password can hold "@".
+    url = re.sub(r"(\w[\w+.-]*://)[^/?#\s]*@", r"\1", url)
     m = re.match(r"^([a-z][a-z0-9+.-]*://)([^/?#]*)([^?#]*)(\?[^#]*)?", url, re.I)
     if not m:
         return REDACTED
@@ -68,20 +70,35 @@ def scrub_url(url):
     path = "/".join(REDACTED if SECRET_SHAPE.search(seg) else seg for seg in path.split("/"))
     if query:
         keys = [pair.split("=", 1)[0] for pair in query[1:].split("&") if pair]
-        path += "?" + "&".join(clean(k, 30) + "=" + REDACTED for k in keys)
+        path += "?" + "&".join((REDACTED if SECRET_SHAPE.search(k) else clean(k, 30)) + "=" + REDACTED for k in keys)
     return scheme + host + path
+
+
+# Flags whose value is user:password, so the whole value goes.
+USER_FLAGS = ("-u", "--user", "--password", "--pass")
+# A NAME=value prefix on a command line.
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=\S*")
 
 
 def scrub_word(word, previous=None):
     """Scrub one token of a command line, an argument or a rule."""
     word = str(word)
-    if previous is not None and previous.startswith("-") and "=" not in previous \
-            and (is_credential_key(previous) or previous in ("-H", "--header", "--headers", "-u", "--user")):
-        return REDACTED
-    if previous is not None and previous.lower().rstrip(":") in ("bearer", "basic", "token"):
-        return REDACTED
+    if previous is not None:
+        prev = previous.strip("\"'")
+        if prev.startswith("-") and "=" not in prev \
+                and (is_credential_key(prev) or prev in ("-H", "--header", "--headers") + USER_FLAGS):
+            return REDACTED
+        if prev.lower().rstrip(":") in ("bearer", "basic", "token"):
+            return REDACTED
+        # The value after a header name such as "Authorization:" or "X-Api-Key:".
+        if prev.endswith(":") and is_credential_key(prev[:-1]):
+            return REDACTED
+    if re.match(r"^-u[^-=\s].*:", word):
+        return "-u" + REDACTED
     for sep in ("=", ":"):
         key, found, value = word.partition(sep)
+        if found and sep == "=" and key in USER_FLAGS and value:
+            return key + "=" + REDACTED
         if found and "//" not in key and is_credential_key(key.strip()):
             return key + sep + REDACTED
         if found and sep == "=" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and value:
@@ -93,9 +110,22 @@ def scrub_word(word, previous=None):
     return tilde(word)
 
 
-def scrub_command(text):
-    words = str(text).split()
+def scrub_words(words):
+    """Scrub a list of arguments, each as one unit, so "X-Api-Key: value" stays together."""
+    words = [str(w) for w in words]
     return " ".join(scrub_word(w, words[i - 1] if i else None) for i, w in enumerate(words))
+
+
+def scrub_command(text):
+    return scrub_words(str(text).split())
+
+
+def split_command(text):
+    """Split like a shell would, so a quoted header stays one word; fall back to spaces."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
 
 
 def scrub_rule(rule):
@@ -103,9 +133,14 @@ def scrub_rule(rule):
     Bash(curl -H "Authorization: Bearer ghp_..." ...)."""
     rule = str(rule)
     m = re.match(r"^([\w.]+)\((.*)\)$", rule, re.S)
-    if not m:
+    if m:
+        return clean(m.group(1) + "(" + scrub_words(split_command(m.group(2))) + ")")
+    # Bare tool names (WebFetch, mcp__server__tool) carry no arguments; keep them
+    # intact so they still match their server. Anything else, such as a rule left
+    # unclosed, is scrubbed like a command line.
+    if re.fullmatch(r"[A-Za-z]+|mcp__[\w.*-]*", rule):
         return clean(rule)
-    return clean(m.group(1) + "(" + scrub_command(m.group(2).replace('"', " ").replace("'", " ")) + ")")
+    return clean(scrub_command(rule))
 
 
 def is_plaintext(value):
@@ -200,6 +235,17 @@ def touches(text, words):
     return any(t.startswith(w) for t in tokens if t for w in words)
 
 
+def split_program(command):
+    """A command line's program, scrubbed and basenamed, after any NAME=value
+    prefixes (which are dropped), and the words that follow it, unscrubbed."""
+    words = str(command or "").split()
+    while words and ASSIGNMENT.fullmatch(words[0]):
+        words.pop(0)
+    if not words:
+        return "", []
+    return os.path.basename(scrub_word(words[0])), words[1:]
+
+
 def server(name, spec, scope):
     spec = spec if isinstance(spec, dict) else {}
     out = {"name": clean(name, 40), "scope": scope}
@@ -208,7 +254,9 @@ def server(name, spec, scope):
         out["url"] = clean(scrub_url(str(url)))
     if spec.get("command"):
         args = spec.get("args") if isinstance(spec.get("args"), list) else []
-        out["command"] = clean(os.path.basename(str(spec["command"])) + " " + scrub_command(" ".join(map(str, args))))
+        # The command string can carry NAME=value prefixes and its own arguments.
+        program, rest = split_program(spec["command"])
+        out["command"] = clean((program + " " + scrub_words(rest + [str(a) for a in args])).strip())
     names, plaintext = [], 0
     for field in ("env", "headers", "http_headers", "env_http_headers"):
         if isinstance(spec.get(field), dict):
@@ -321,7 +369,7 @@ def command_words(rule):
     """Bash(curl --silent:*) -> ['curl', '--silent']; Bash -> ['*']; a plain command -> its words."""
     m = re.match(r"^(Bash|Shell)(?:\((.*)\))?$", str(rule), re.S)
     inner = (m.group(2) or "*") if m else str(rule)
-    words = [w.rstrip(":*") or "*" for w in inner.split() if not re.fullmatch(r"[A-Za-z_]\w*=\S*", w)]
+    words = [w.rstrip(":*") or "*" for w in inner.split() if not ASSIGNMENT.fullmatch(w)]
     if not words:
         return ["*"]
     return [os.path.basename(words[0])] + [w for w in words[1:] if w != "*"]
@@ -424,8 +472,8 @@ def claude_code(flags):
         for event, groups in (s.get("hooks") or {}).items():
             for group in groups if isinstance(groups, list) else []:
                 for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
-                    program = os.path.basename(str(hook.get("command", "")).split()[0]) if hook.get("command") else ""
-                    entry = {"event": clean(event, 30), "scope": scope, "program": clean(program, 30)}
+                    entry = {"event": clean(event, 30), "scope": scope,
+                             "program": clean(split_program(hook.get("command"))[0], 30)}
                     if entry not in r["hooks"]:
                         r["hooks"].append(entry)
         env = s.get("env") if isinstance(s.get("env"), dict) else {}
