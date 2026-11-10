@@ -138,9 +138,45 @@ class CanSend(unittest.TestCase):
             "node scripts/test.js": False, "Bash(npm run test:*)": True, "npm test": True, "Bash(npm test:*)": True,
             "npm ci": False,
             "ls": False, "Shell(ls)": False, "gh api": True, "gh auth status": False,
+            # Deploy, upload and mail tools, and cloud CLIs by subcommand.
+            "Bash(vercel *)": True, "Bash(aws s3 *)": True, "Bash(docker push *)": True, "Bash(kubectl cp *)": True,
+            "Bash(rclone *)": True, "Bash(sendmail *)": True, "Bash(xdg-open *)": True, "Bash(twine upload *)": True,
+            "Bash(gh workflow run:*)": True, "Bash(podman:*)": True, "Bash(aws:*)": True,
+            "Bash(aws sts get-caller-identity)": False, "Bash(docker ps)": False, "Bash(kubectl get *)": False,
+            "Bash(cargo check)": False, "Bash(uv sync)": False,
+            # Global flags can come before the subcommand.
+            "Bash(kubectl -n prod exec *)": True, "Bash(aws --profile prod s3 cp *)": True,
+            "Bash(docker --context=ci push *)": True, "Bash(git -C sub push:*)": True,
+            "Bash(kubectl -n prod get *)": False, "Bash(git --no-pager log *)": False, "Bash(git -C sub status)": False,
+            # An interpreter handed code to run, and commands that run their arguments.
+            "Bash(python3 -c *)": True, "Bash(node -e:*)": True, "Bash(bash -lc *)": True, "Bash(deno eval *)": True,
+            "Bash(python3 -u -c *)": True, "Bash(bash -l -c *)": True,
+            "Bash(python3 -V)": False, "Bash(node --version)": False, "Bash(bash scripts/build.sh)": False,
+            "Bash(python3 scripts/check.py -c config.ini)": False, "Bash(deno run main.ts)": False,
+            "Bash(env *)": True, "Bash(direnv exec *)": True, "Bash(sudo:*)": True, "Bash(op run *)": True,
+            "Bash(op --account work run *)": True, "Bash(env)": False,
+            "Bash(direnv allow)": False, "Bash(op whoami)": False, "Bash(timeout 5 ls)": False,
+            # Monitor follows Bash's rules, and package runners match what auto mode drops.
+            "Monitor": True, "Monitor(curl *)": True, "Monitor(ls)": False,
+            "Bash(bun run:*)": True, "Bash(pnpx:*)": True, "Bash(npm x:*)": True,
+            # Claude Code skips an unanchored "*" rule.
+            "*": False,
         }
         for rule, expected in cases.items():
             self.assertEqual(agent_setup.can_send(rule), expected, rule)
+
+    def test_rules_that_run_their_arguments(self):
+        cases = {
+            "Bash(env *)": True, "Bash(xargs:*)": True, "Bash(direnv exec *)": True, "Bash(direnv:*)": True,
+            "Bash(nix develop *)": True, "Bash(nix-shell *)": True, "Bash(aws-vault exec *)": True,
+            "Bash(sudo -u deploy ls)": True, "Bash(mise -C app exec *)": True,
+            # With no wildcard, a rule on the bare wrapper runs only the wrapper.
+            "Bash(env)": False, "Bash(direnv)": False,
+            "Bash(direnv allow)": False, "Bash(nix build)": False, "Bash(curl:*)": False, "Bash": False,
+            "Bash(timeout 5 ls)": False, "Bash(nohup *)": False,
+        }
+        for rule, expected in cases.items():
+            self.assertEqual(agent_setup.runs_its_arguments(rule), expected, rule)
 
 
 class AutoMode(unittest.TestCase):
@@ -150,6 +186,9 @@ class AutoMode(unittest.TestCase):
             "Bash(npx:*)": True, "Bash(uv run:*)": True, "Agent": True,
             "Bash(curl:*)": False, "Bash(git push:*)": False, "Bash(npm test)": False, "Bash(npm test:*)": False,
             "Bash(python3 scripts/check.py)": False, "WebFetch": False, "mcp__github__create_issue": False,
+            "Monitor": True, "Monitor(curl *)": True, "Bash(python3 -c *)": True, "Bash(bun run:*)": True,
+            "Bash(vercel *)": False, "Bash(aws s3 *)": False, "Bash(docker run *)": False,
+            "Bash(env *)": False, "Bash(direnv exec *)": False, "*": False,
         }
         for rule, expected in cases.items():
             self.assertEqual(agent_setup.dropped_in_auto(rule), expected, rule)
@@ -243,6 +282,52 @@ class EndToEnd(unittest.TestCase):
                                                                                    "allow": ["Bash(npm run:*)"]}}))
         report = self.run_script()
         self.assertTrue(any(p["via"].startswith("Bash(npm run:*)") and p["asks"] == "no" for p in report["ways_out"]))
+
+    def allow(self, rules, mode=None):
+        perms = dict({"allow": rules}, **({"defaultMode": mode} if mode else {}))
+        self.write(self.home, ".claude/settings.json", json.dumps({"permissions": perms}))
+        report = self.run_script()
+        return report, {p["via"].split(" (")[0]: p for p in report["ways_out"]}
+
+    def test_a_deploy_rule_skips_auto_modes_check(self):
+        report, ways = self.allow(["Bash(vercel *)"])
+        self.assertEqual(report["mode"], "auto")
+        self.assertEqual(ways["Bash(vercel *)"], {"via": "Bash(vercel *) (user allow rule)", "asks": "no"})
+        self.assertEqual(report["fix"]["change"], "remove the allow rule Bash(vercel *)")
+        self.assertEqual(report["fix"]["approver_after"], "classifier")
+
+    def test_a_cloud_cli_rule_counts_by_its_subcommand(self):
+        report, ways = self.allow(["Bash(aws s3 *)", "Bash(aws sts get-caller-identity)"], "default")
+        self.assertEqual(ways["Bash(aws s3 *)"]["asks"], "no")
+        self.assertNotIn("Bash(aws sts get-caller-identity)", ways)
+        self.assertEqual(report["fix"]["change"], "remove the allow rule Bash(aws s3 *)")
+
+    def test_a_wrapper_rule_is_marked_unverified_in_auto_mode(self):
+        report, ways = self.allow(["Bash(direnv exec *)"])
+        self.assertEqual(ways["Bash(direnv exec *)"]["asks"], "no")
+        self.assertIs(ways["Bash(direnv exec *)"]["auto_mode_unverified"], True)
+        self.assertIs(report["settings"]["allow"][0]["runs_its_arguments"], True)
+        self.assertFalse(report["settings"]["allow"][0]["dropped_in_auto"])
+
+    def test_a_wrapper_rule_outside_auto_mode_has_nothing_to_verify(self):
+        _, ways = self.allow(["Bash(direnv exec *)"], "default")
+        self.assertEqual(ways["Bash(direnv exec *)"], {"via": "Bash(direnv exec *) (user allow rule)", "asks": "no"})
+
+    def test_inline_code_and_monitor_rules_go_to_the_classifier_in_auto_mode(self):
+        _, ways = self.allow(["Bash(python3 -c *)", "Monitor"])
+        self.assertEqual(ways["Bash(python3 -c *)"]["asks"], "classifier")
+        self.assertEqual(ways["Monitor"]["asks"], "classifier")
+
+    def test_inline_code_and_monitor_rules_skip_approval_in_manual_mode(self):
+        report, ways = self.allow(["Bash(python3 -c *)", "Monitor(curl *)"], "default")
+        self.assertEqual(ways["Bash(python3 -c *)"]["asks"], "no")
+        self.assertEqual(ways["Monitor(curl *)"]["asks"], "no")
+        self.assertEqual(report["fix"]["change"], "remove the allow rules Bash(python3 -c *), Monitor(curl *)")
+
+    def test_an_unanchored_star_rule_is_not_a_way_out(self):
+        report, ways = self.allow(["*"], "default")
+        self.assertNotIn("*", ways)
+        self.assertIsNone(report["fix"])
 
     def test_env_prefix_in_a_hook_command(self):
         self.write(self.home, ".claude/settings.json", json.dumps({"hooks": {"PostToolUse": [

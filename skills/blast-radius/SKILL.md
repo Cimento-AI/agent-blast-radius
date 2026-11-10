@@ -23,7 +23,7 @@ A script reads the facts: Claude Code's settings layers, MCP servers, allow rule
 
 Run `python3 -I ${CLAUDE_PLUGIN_ROOT}/scripts/agent_setup.py` and read the JSON. Don't print it or summarize it back. The useful parts:
 
-- `reads`: what you read. `can_open`: private things you can open. `ways_out`: how data can leave; in `ways_out[].asks`, "no" means nobody approves, "classifier" means a model approves, and "you" means the person does. In auto mode, Claude Code drops broad allow rules when it starts (blanket shell, wildcarded interpreters, package-manager run commands), and `ways_out` already shows those as the classifier's. Don't call a dropped rule a bypass.
+- `reads`: what you read. `can_open`: private things you can open. `ways_out`: how data can leave; in `ways_out[].asks`, "no" means nobody approves, "classifier" means a model approves, and "you" means the person does. In auto mode, Claude Code drops broad allow rules when it starts (blanket shell, wildcarded interpreters, package-manager run commands), and `ways_out` already shows those as the classifier's. Don't call a dropped rule a bypass. An entry with `auto_mode_unverified` is an allow rule on a command that runs whatever command follows it (`env`, `sudo`, `direnv exec`). I can't see whether auto mode keeps that rule or drops it, so say it "most likely" skips the classifier, every time you say it.
 - `mode` and `mode_from`: your permission mode and what set it. A shell alias overrides every settings file. "Claude Code's default" means no settings file or shell alias sets it; say "nothing on this laptop sets my mode", not that it's every install's default or that nobody chose it.
 - `whole_trifecta_servers`: connections that can read others' text, hold private data and send, all in one connection. That says nothing about who approves (`asks` does), so don't say "on its own".
 - `settings`: the detail, including each MCP server's command or URL. Each entry's `scope` says whose it is: "local" is the person's own uncommitted config, most likely approvals they gave at a prompt ("most likely a rule you approved"); "repo" is committed config, written by whoever can commit. `company_managed`: which settings the company manages.
@@ -68,7 +68,7 @@ Choose the one true thing this person least expects. Web pages and repos are tru
 
 If nothing leaves without someone approving, say who approves (the person, or a model). That's still news.
 
-When the story is an allow rule on a command that sends, say in one plain clause what it lets leave and whether the rule limits where ("git push sends whatever is committed, and the rule doesn't limit the remote"). For a test or build runner, the code comes from whoever wrote the repo's scripts and its dependencies, when you run it there.
+When the story is an allow rule on a command that sends, say in one plain clause what it lets leave and whether the rule limits where ("git push sends whatever is committed, and the rule doesn't limit the remote"). For a rule on a command that runs another command, or on an interpreter given code to run, say it allows any command, not only the one named. For a test or build runner, the code comes from whoever wrote the repo's scripts and its dependencies, when you run it there.
 
 ## 5. Would anyone know?
 
