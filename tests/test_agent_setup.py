@@ -514,7 +514,7 @@ class NoSecretReachesOutput(unittest.TestCase):
             (self.repo, ".mcp.json"): {"mcpServers": self.servers("repo")},
             (self.home, ".aws/credentials"): "[default]\naws_secret_access_key = %s\n" % c("~/.aws/credentials"),
             (self.home, ".npmrc"): "//registry.npmjs.org/:_authToken=%s\n" % c("~/.npmrc"),
-            (self.home, ".ssh/id_rsa"): "-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE KEY-----\n" % c("SSH key body"),
+            (self.home, ".ssh/id_rsa"): c("SSH key body") + "\n",
             (self.home, ".zshrc"): "export GITHUB_TOKEN=%s\nalias claude='ANTHROPIC_API_KEY=%s claude --dangerously-skip-permissions'\n" % (
                 c("~/.zshrc export"), c("~/.zshrc claude alias")),
         })
