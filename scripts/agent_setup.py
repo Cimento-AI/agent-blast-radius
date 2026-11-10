@@ -19,7 +19,7 @@ import re
 import shlex
 import sys
 
-VERSION = "0.5.2"
+VERSION = "0.5.4"
 HOME = os.path.expanduser("~")
 # Tests point this at a fake filesystem root; real runs leave it empty.
 SYSTEM = os.environ.get("BLAST_RADIUS_SYSTEM_ROOT", "")
@@ -472,7 +472,8 @@ def claude_code(flags):
             r["sandbox"] = {"enabled": bool(sb.get("enabled")), "set_by": scope,
                             "allowed_domains": len(net.get("allowedDomains") or []),
                             "allows_any_domain": "*" in (net.get("allowedDomains") or []),
-                            "excluded_commands": [clean(c, 30) for c in (sb.get("excludedCommands") or [])][:10],
+                            "excluded_commands": [clean(scrub_words(split_command(str(c))), 30)
+                                                  for c in (sb.get("excludedCommands") or [])][:10],
                             "unsandboxed_retry": sb.get("allowUnsandboxedCommands", True) is not False}
         for event, groups in (s.get("hooks") or {}).items():
             for group in groups if isinstance(groups, list) else []:

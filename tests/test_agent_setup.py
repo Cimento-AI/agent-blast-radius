@@ -1,5 +1,7 @@
 """Run with: python3 -m unittest discover tests"""
 
+import ast
+import glob
 import importlib.util
 import json
 import os
@@ -9,10 +11,18 @@ import tempfile
 import unittest
 from unittest import mock
 
-SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts", "agent_setup.py")
+ROOT = os.path.join(os.path.dirname(__file__), "..")
+SCRIPT = os.path.join(ROOT, "scripts", "agent_setup.py")
 spec = importlib.util.spec_from_file_location("agent_setup", SCRIPT)
 agent_setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(agent_setup)
+
+
+def script_output(home, system, cwd):
+    """The script's raw output on a fake laptop."""
+    env = {"HOME": home, "BLAST_RADIUS_SYSTEM_ROOT": system, "PATH": os.environ.get("PATH", "")}
+    return subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)], cwd=cwd, env=env,
+                          capture_output=True, text=True, check=True).stdout
 
 
 class Redaction(unittest.TestCase):
@@ -178,9 +188,7 @@ class EndToEnd(unittest.TestCase):
             f.write(text)
 
     def run_script(self, cwd=None):
-        env = {"HOME": self.home, "BLAST_RADIUS_SYSTEM_ROOT": self.system, "PATH": os.environ.get("PATH", "")}
-        out = subprocess.run([sys.executable, "-I", os.path.abspath(SCRIPT)], cwd=cwd or self.repo, env=env,
-                             capture_output=True, text=True, check=True).stdout
+        out = script_output(self.home, self.system, cwd or self.repo)
         self.assertNotIn(self.token, out)
         self.assertNotIn(self.aws_secret, out)
         return json.loads(out)
@@ -415,6 +423,184 @@ class RepoRoot(unittest.TestCase):
         self.assertEqual(self.locate(repo, agent_setup.local_settings_root), repo)
         with mock.patch.object(agent_setup.os, "getuid", return_value=os.getuid() + 1):
             self.assertIsNone(self.locate(repo, agent_setup.local_settings_root))
+
+
+class NoSecretReachesOutput(unittest.TestCase):
+    """Plants a different fake secret in every field the script reads, runs the
+    script, and names each field whose secret came out. A new reader adds its
+    field to fixture(), settings() or servers() in one line."""
+
+    PLUGIN = "tools@market"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = os.path.realpath(self.tmp.name)
+        self.home, self.repo, self.system = (os.path.join(root, d) for d in ("home", "repo", "system"))
+        self.plugin = os.path.join(self.home, ".claude", "plugins", "cache", "tools")
+        os.makedirs(os.path.join(self.repo, ".git"))
+        self.planted = {}
+
+    def canary(self, field, shaped=True):
+        """A fake secret for one field. Shaped ones look like a GitHub token;
+        the others are short and plain, for places where only the key, flag or
+        header beside them says they are a credential."""
+        # Fixed width, so no marker is the start of another.
+        self.assertLess(len(self.planted), 1000)
+        marker = "cnry%03d" % len(self.planted)
+        self.planted[marker] = field
+        return "ghp_" + marker.ljust(36, "x") if shaped else marker
+
+    def settings(self, layer):
+        def c(field, shaped=True):
+            return self.canary("%s settings, %s" % (layer, field), shaped)
+
+        def rules(kind):
+            return [
+                'Bash(curl -H "Authorization: Bearer %s" https://api.example.com:*)' % c(kind + " rule Bearer header"),
+                "Bash(deploy --token %s:*)" % c(kind + " rule --token flag", shaped=False),
+                "Bash(PGPASSWORD=%s psql:*)" % c(kind + " rule PGPASSWORD= prefix", shaped=False),
+            ]
+
+        return {
+            "env": {"API_TOKEN": c("env value"),
+                    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer " + c("telemetry header in env")},
+            "permissions": {"allow": rules("allow"), "deny": rules("deny")},
+            "sandbox": {"enabled": True, "excludedCommands": [
+                "NPM_TOKEN=%s npm" % c("sandbox excluded command", shaped=False)]},
+            "hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "DD_API_KEY=%s /usr/local/bin/audit --key %s" % (
+                c("hook command NAME=value prefix", shaped=False), c("hook command argument"))}]}]},
+        }
+
+    def servers(self, scope):
+        def c(field, shaped=True):
+            return self.canary("%s MCP server, %s" % (scope, field), shaped)
+        slug = scope.replace(" ", "-")
+        return {
+            slug + "-stdio": {
+                "command": "API_KEY=%s npx" % c("command NAME=value prefix", shaped=False),
+                "args": ["--token", c("args --token flag", shaped=False),
+                         "--api-key=" + c("args --api-key= flag", shaped=False), c("args bare token"),
+                         "-H", "X-Api-Key: " + c("args header", shaped=False)],
+                "env": {"SERVICE_TOKEN": c("env value")}},
+            slug + "-http": {
+                "url": "https://user:%s@mcp.example.com/%s/mcp?api_key=%s" % (
+                    c("url userinfo", shaped=False), c("url path"), c("url query", shaped=False)),
+                "headers": {"Authorization": "Bearer " + c("header value")}},
+        }
+
+    def fixture(self):
+        """Every file the script reads, as {(folder, path in it): JSON object or text}."""
+        c = self.canary
+        files = {(self.home, path[2:]): c(path) + "\n" for path, _, _ in agent_setup.CREDENTIAL_FILES}
+        files.update({(self.home, rc): "export GITHUB_TOKEN=%s\n" % c("~/" + rc + " export")
+                      for rc in (".bashrc", ".bash_profile", ".profile", ".zprofile", ".config/fish/config.fish")})
+        files.update({(self.repo, name): "API_TOKEN=%s\n" % c("the repo's " + name)
+                      for name in (".env", ".env.local", ".env.production")})
+        managed = "Library/Application Support/ClaudeCode" if sys.platform == "darwin" else "etc/claude-code"
+        files.update({
+            (self.system, managed + "/managed-settings.json"): self.settings("company"),
+            (self.system, managed + "/managed-settings.d/10-extra.json"): self.settings("company drop-in"),
+            (self.system, managed + "/managed-mcp.json"): {"mcpServers": self.servers("company")},
+            (self.home, ".claude/remote-settings.json"): self.settings("company remote"),
+            (self.home, ".claude/settings.json"): dict(self.settings("user"), enabledPlugins={self.PLUGIN: True}),
+            (self.home, ".claude.json"): {"mcpServers": self.servers("user"),
+                                          "projects": {self.repo: {"mcpServers": self.servers("local")}}},
+            (self.home, ".claude/plugins/installed_plugins.json"): {"plugins": {self.PLUGIN: [{"installPath": self.plugin}]}},
+            (self.plugin, ".mcp.json"): {"mcpServers": self.servers("plugin")},
+            (self.plugin, ".claude-plugin/plugin.json"): {"mcpServers": self.servers("plugin manifest")},
+            (self.repo, ".claude/settings.json"): self.settings("repo"),
+            (self.repo, ".claude/settings.local.json"): self.settings("local"),
+            (self.repo, ".mcp.json"): {"mcpServers": self.servers("repo")},
+            (self.home, ".aws/credentials"): "[default]\naws_secret_access_key = %s\n" % c("~/.aws/credentials"),
+            (self.home, ".npmrc"): "//registry.npmjs.org/:_authToken=%s\n" % c("~/.npmrc"),
+            (self.home, ".ssh/id_rsa"): "-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE KEY-----\n" % c("SSH key body"),
+            (self.home, ".zshrc"): "export GITHUB_TOKEN=%s\nalias claude='ANTHROPIC_API_KEY=%s claude --dangerously-skip-permissions'\n" % (
+                c("~/.zshrc export"), c("~/.zshrc claude alias")),
+        })
+        return files
+
+    def test_no_planted_secret_is_printed(self):
+        files = self.fixture()
+        for (base, rel), content in files.items():
+            path = os.path.join(base, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(content if isinstance(content, str) else json.dumps(content))
+        out = script_output(self.home, self.system, self.repo)
+        leaked = sorted(field for marker, field in self.planted.items() if marker in out)
+        self.assertEqual(leaked, [], "secrets planted in these fields reached the output")
+
+        # The sweep only means something if the script read what was planted
+        # and printed each field whole: a capped string could hide a canary.
+        report = json.loads(out)
+        for base, rel in files:
+            path = os.path.join(base, rel).replace(self.home, "~")
+            self.assertIn(agent_setup.clean(path, 200), report["files_read"])
+        objects = [content for content in files.values() if isinstance(content, dict)]
+        layers = [o for o in objects if "permissions" in o]
+        groups = [o["mcpServers"] for o in objects if "mcpServers" in o]
+        groups += [project["mcpServers"] for o in objects for project in o.get("projects", {}).values()]
+        settings = report["settings"]
+        self.assertEqual(len(settings["mcp_servers"]), sum(len(group) for group in groups))
+        self.assertEqual({s["scope"] for s in settings["mcp_servers"]},
+                         {"user", "local", "repo", "company", "plugin " + self.PLUGIN})
+        for kind in ("allow", "deny"):
+            self.assertEqual(len(settings[kind]), sum(len(layer["permissions"][kind]) for layer in layers))
+        printed = [r["rule"] for r in settings["allow"] + settings["deny"]]
+        printed += [s.get("command", "") + s.get("url", "") for s in settings["mcp_servers"]]
+        self.assertEqual([text for text in printed if text.endswith("…")], [])
+        self.assertEqual(sorted((h["scope"], h["program"]) for h in settings["hooks"]),
+                         [(scope, "audit") for scope in ("company", "local", "repo", "user")])
+        self.assertEqual(settings["sandbox"]["excluded_commands"], ["NPM_TOKEN=<redacted> npm"])
+        self.assertEqual(sorted(x["file"] for x in report["credentials"]),
+                         [".env", ".env.local", ".env.production", "~/.aws/credentials", "~/.npmrc", "~/.ssh/id_rsa"])
+        self.assertEqual(report["mode_from"], "shell alias in ~/.zshrc")
+
+
+class PythonFloor(unittest.TestCase):
+    """The script's docstring promises Python 3.8+, so neither it nor its tests
+    may use newer syntax or these newer library calls. The syntax check is as
+    strict as the running interpreter makes it: ast rejects what it knows came
+    after 3.8, which is not every later addition."""
+
+    NEWER_STR_METHODS = ("removeprefix", "removesuffix")  # Python 3.9
+
+    def sources(self):
+        paths = [p for folder in ("scripts", "tests")
+                 for p in sorted(glob.glob(os.path.join(ROOT, folder, "**", "*.py"), recursive=True))]
+        self.assertIn(os.path.abspath(SCRIPT), [os.path.abspath(p) for p in paths])
+        for path in paths:
+            with open(path, encoding="utf-8") as f:
+                yield os.path.relpath(path, ROOT), f.read()
+
+    def test_syntax_parses_at_the_3_8_feature_level(self):
+        for name, source in self.sources():
+            try:
+                ast.parse(source, filename=name, feature_version=(3, 8))
+            except SyntaxError as error:
+                self.fail("%s line %s is not Python 3.8 syntax: %s" % (name, error.lineno, error.msg))
+
+    def test_no_library_calls_newer_than_3_8(self):
+        for name, source in self.sources():
+            for node in ast.walk(ast.parse(source, filename=name)):
+                newer = None
+                if isinstance(node, ast.Attribute) and node.attr in self.NEWER_STR_METHODS:
+                    newer = "str." + node.attr
+                elif isinstance(node, ast.Attribute) and node.attr == "cache" \
+                        and isinstance(node.value, ast.Name) and node.value.id == "functools":
+                    newer = "functools.cache"
+                elif isinstance(node, ast.ImportFrom) and node.module == "functools" \
+                        and any(alias.name == "cache" for alias in node.names):
+                    newer = "functools.cache"
+                if newer:
+                    self.fail("%s line %s uses %s, which Python 3.8 lacks" % (name, node.lineno, newer))
+
+
+class Version(unittest.TestCase):
+    def test_version_matches_the_manifest(self):
+        with open(os.path.join(ROOT, ".claude-plugin", "plugin.json"), encoding="utf-8") as f:
+            self.assertEqual(agent_setup.VERSION, json.load(f)["version"])
 
 
 if __name__ == "__main__":
