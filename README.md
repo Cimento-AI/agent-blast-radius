@@ -43,7 +43,7 @@ Say yes and it makes the change and shows you the diff. Ask for the note and you
 
 The work is split in two on purpose.
 
-[`scripts/agent_setup.py`](scripts/agent_setup.py) gathers the facts, and it's where every judgment you'd want to audit lives: which settings layers apply, which allow rules can send data out (curl, ssh, `git push`, a bare `node` or `python`, and `npm test`, which runs whatever the repo says), whether anyone approves them (auto mode drops the broad ones itself, and the script accounts for that), and what the fix is. It's deterministic, standard-library Python, and covered by tests. You can run it without Claude:
+[`scripts/agent_setup.py`](scripts/agent_setup.py) gathers the facts, and it's where every judgment you'd want to audit lives: which settings layers apply, which allow rules can send data out (curl, ssh, `git push`, mail and upload tools, deploy CLIs like `vercel`, cloud CLIs by subcommand such as `aws s3` and `docker push`, a bare `node` or `python` or one handed code with `-c`, wrappers that run whatever follows them such as `env` and `direnv exec`, and `npm test`, which runs whatever the repo says), whether anyone approves them (auto mode drops the broad ones itself, and the script accounts for that), and what the fix is. It's deterministic, standard-library Python, and covered by tests. You can run it without Claude:
 
 ```
 python3 scripts/agent_setup.py

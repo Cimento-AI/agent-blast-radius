@@ -19,7 +19,7 @@ import re
 import shlex
 import sys
 
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 HOME = os.path.expanduser("~")
 # Tests point this at a fake filesystem root; real runs leave it empty.
 SYSTEM = os.environ.get("BLAST_RADIUS_SYSTEM_ROOT", "")
@@ -354,24 +354,50 @@ def shell_flags():
 
 # ---------------------------------------------------------------- Claude Code
 
-# Commands that can send data off the machine whatever their arguments.
+# Commands that can send data off the machine whatever their arguments: network
+# tools, mail senders, upload and tunnel tools, deploy CLIs, and openers that hand
+# a URL or a script to another program.
 SENDS_ANYTHING = {"curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "rsync", "ftp",
-                  "telnet", "http", "https", "xh", "open"}
+                  "telnet", "http", "https", "xh", "open", "xdg-open", "osascript",
+                  "mail", "mailx", "sendmail", "mutt", "msmtp",
+                  "rclone", "s3cmd", "gsutil", "azcopy", "lftp", "ngrok", "cloudflared",
+                  "vercel", "netlify", "firebase", "flyctl", "heroku", "surge", "twine"}
 # Commands that can when allowed with any arguments: interpreters, runners, cloud CLIs.
 SENDS_WHEN_UNRESTRICTED = {"node", "deno", "bun", "bunx", "python", "python3", "ruby", "perl", "php", "bash",
-                           "sh", "zsh", "npx", "uvx", "docker", "aws", "gcloud", "az", "kubectl", "make"}
-# test, start and run execute scripts the repo defines, so whoever wrote the repo decides what they do.
+                           "sh", "zsh", "npx", "pnpx", "uvx", "docker", "aws", "gcloud", "az", "kubectl", "make"}
+# Subcommands that send, publish or run something else. test, start and run execute
+# scripts the repo defines, so whoever wrote the repo decides what they do.
 SENDING_SUBCOMMANDS = {"git": {"push", "remote", "send-email"},
-                       "gh": {"api", "gist", "issue", "pr", "repo", "release"},
-                       "npm": {"run", "exec", "publish", "test", "t", "start"},
+                       "gh": {"api", "gist", "issue", "pr", "repo", "release", "workflow"},
+                       "npm": {"run", "exec", "x", "publish", "test", "t", "start"},
                        "pnpm": {"run", "exec", "dlx", "publish", "test", "t", "start"},
-                       "yarn": {"run", "exec", "dlx", "publish", "test", "start"}, "uv": {"run"},
-                       "pip": {"install"}, "pip3": {"install"}}
+                       "yarn": {"run", "exec", "dlx", "publish", "test", "start"},
+                       "bun": {"run", "x"}, "uv": {"run", "publish"},
+                       "pip": {"install"}, "pip3": {"install"},
+                       "aws": {"s3", "s3api", "ses", "sesv2", "sns", "sqs"},
+                       "gcloud": {"storage"}, "az": {"storage"},
+                       "docker": {"push", "exec", "run"}, "podman": {"push", "exec", "run"},
+                       "kubectl": {"cp", "exec"}, "cargo": {"publish"}, "gem": {"push"},
+                       "poetry": {"publish"}, "wrangler": {"deploy"}}
+# The word after an interpreter that hands it code or a module to run, so a rule
+# on it allows any command the interpreter can start.
+INLINE_CODE = {"python": {"-c", "-m"}, "python3": {"-c", "-m"}, "node": {"-e", "-p", "--eval"},
+               "bash": {"-c"}, "sh": {"-c"}, "zsh": {"-c"}, "perl": {"-e", "-E"}, "ruby": {"-e"},
+               "deno": {"eval"}, "bun": {"-e"}}
+# Commands that run the command line they're given, so a rule on one allows any
+# command. None means the command itself does; a set names the subcommands that do.
+# The wrappers Claude Code strips before matching a rule (timeout, time, nice,
+# nohup, stdbuf, command, builtin, noglob) are left out: a rule on one of those
+# doesn't widen what runs (https://code.claude.com/docs/en/permissions).
+RUNS_ITS_ARGUMENTS = {"env": None, "sudo": None, "doas": None, "xargs": None, "nix-shell": None,
+                      "direnv": {"exec"}, "mise": {"exec"}, "devbox": {"run"}, "nix": {"develop"},
+                      "op": {"run"}, "aws-vault": {"exec"}, "doppler": {"run"}}
 
 
 def command_words(rule):
-    """Bash(curl --silent:*) -> ['curl', '--silent']; Bash -> ['*']; a plain command -> its words."""
-    m = re.match(r"^(Bash|Shell)(?:\((.*)\))?$", str(rule), re.S)
+    """Bash(curl --silent:*) -> ['curl', '--silent']; Bash -> ['*']; a plain command -> its words.
+    Monitor runs its command under the same rules as Bash, so it parses the same way."""
+    m = re.match(r"^(Bash|Shell|Monitor)(?:\((.*)\))?$", str(rule), re.S)
     inner = (m.group(2) or "*") if m else str(rule)
     words = [w.rstrip(":*") or "*" for w in split_command(inner) if not ASSIGNMENT.fullmatch(w)]
     if not words:
@@ -379,16 +405,51 @@ def command_words(rule):
     return [os.path.basename(words[0])] + [w for w in words[1:] if w != "*"]
 
 
-def can_send(rule):
+def subcommand(rest):
+    """The words that can name a command's subcommand: the first one, or when
+    global flags come first (kubectl -n prod exec), the first word after them and
+    the one after that, since a flag may take a value."""
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 1
+    return rest[i:i + (2 if i else 1)]
+
+
+def runs_its_arguments(rule):
+    """True for a rule on a wrapper such as env or direnv exec."""
     words = command_words(rule)
     head, rest = words[0], words[1:]
-    if head == "*" or head in SENDS_ANYTHING:
-        return True
-    if head in SENDS_WHEN_UNRESTRICTED:
-        return not rest
-    if head in SENDING_SUBCOMMANDS:
-        return not rest or rest[0] in SENDING_SUBCOMMANDS[head]
+    if head not in RUNS_ITS_ARGUMENTS:
+        return False
+    if not rest:
+        # With no wildcard, a rule on the bare command (Bash(env)) runs nothing else.
+        return str(rule).rstrip(" )").endswith("*")
+    subcommands = RUNS_ITS_ARGUMENTS[head]
+    return subcommands is None or any(w in subcommands for w in subcommand(rest))
+
+
+def runs_inline_code(head, rest):
+    flags = INLINE_CODE.get(head, ())
+    for word in rest:
+        # Short flags can be bundled (-lc, -pe); the one that takes the code comes last.
+        if word in flags or (re.fullmatch(r"-[A-Za-z]{2,}", word) and "-" + word[-1] in flags):
+            return True
+        if not word.startswith("-"):
+            break
     return False
+
+
+def can_send(rule):
+    # Claude Code skips an unanchored "*" allow rule, so it approves nothing.
+    if str(rule).strip() == "*":
+        return False
+    words = command_words(rule)
+    head, rest = words[0], words[1:]
+    if head == "*" or head in SENDS_ANYTHING or runs_its_arguments(rule):
+        return True
+    if not rest:
+        return head in SENDS_WHEN_UNRESTRICTED or head in SENDING_SUBCOMMANDS
+    return any(w in SENDING_SUBCOMMANDS.get(head, ()) for w in subcommand(rest)) or runs_inline_code(head, rest)
 
 
 # Auto mode drops allow rules that grant arbitrary code execution when it starts
@@ -461,6 +522,8 @@ def claude_code(flags):
             for rule in perms.get(kind) or []:
                 entry = {"rule": scrub_rule(rule), "command": rule_command(rule), "sends": can_send(rule),
                          "dropped_in_auto": dropped_in_auto(rule), "scope": scope}
+                if runs_its_arguments(rule):
+                    entry["runs_its_arguments"] = True
                 if scope == "local":
                     entry["file"] = local_file[path]
                 r[kind].append(entry)
@@ -545,10 +608,10 @@ def claude_verdict(c, data):
     sandbox = c["sandbox"] if c["sandbox"] and c["sandbox"]["enabled"] else None
     out = []
 
-    def way_out(via, asks):
+    def way_out(via, asks, **tags):
         # The same rule can sit in two files; it's still one way out.
-        if {"via": via, "asks": asks} not in out:
-            out.append({"via": via, "asks": asks})
+        if dict(via=via, asks=asks, **tags) not in out:
+            out.append(dict(via=via, asks=asks, **tags))
 
     if ask_any:
         why = {"no": "any command, mode " + mode + (" (shell alias)" if flags else ""),
@@ -563,7 +626,11 @@ def claude_verdict(c, data):
                 asks, why = "classifier", " (" + rule["scope"] + " allow rule, dropped in auto mode, so the classifier decides)"
             elif sandbox and not sandbox["allows_any_domain"] and cmd not in sandbox["excluded_commands"]:
                 asks = ask_any or "you"
-            way_out(rule["rule"] + why, asks)
+            # The docs don't say whether auto mode keeps a rule on a wrapper such as
+            # env or direnv exec, or drops it like a rule on an interpreter.
+            unverified = {"auto_mode_unverified": True} if asks == "no" and mode == "auto" \
+                and rule.get("runs_its_arguments") else {}
+            way_out(rule["rule"] + why, asks, **unverified)
         elif rule["rule"].startswith("WebFetch") and rule["rule"] in ("WebFetch", "WebFetch(domain:*)"):
             way_out(rule["rule"] + " (" + rule["scope"] + " allow rule)", "no")
     allowed_mcp = {r["rule"][5:].split("__")[0] for r in c["allow"] if r["rule"].startswith("mcp__")}
